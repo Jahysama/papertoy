@@ -12,8 +12,8 @@
         .zgl = .{
             // NOTE: This is my opengl-3.3 branch which lowers the required OpenGL version to 3.3
             //       from 4.5. It is otherwise identical to zgl upstream.
-            .url = "https://github.com/sin-ack/zgl/archive/21d06c1e6187401372f174cea602eaf85ce6f804.tar.gz",
-            .hash = "zgl-1.1.0-p_NpADNjBQAEJoOxiCci_ddmXZuPx1XAkmCsTQ1_vnib",
+            .url = "https://github.com/sin-ack/zgl/archive/c8d9a0e57f9024a4090f24b8365071b890231c46.tar.gz",
+            .hash = "zgl-1.1.0-p_NpAOxhBQCJ4EP_bQsAoLhR_A0wxGZN9gfsH3f05Hdm",
         },
         .@"zig-args" = .{
             .url = "https://github.com/ikskuh/zig-args/archive/4c305bcb45fd3c4b74b7bf7f907cf3fc12f415a2.tar.gz",

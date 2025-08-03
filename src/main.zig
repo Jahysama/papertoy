@@ -10,6 +10,9 @@ const gl = @import("zgl");
 const wayland = @import("wayland");
 const zig_args = @import("zig-args");
 
+const Shader = @import("shader.zig").Shader;
+const GlobalAttributes = @import("shader.zig").GlobalAttributes;
+
 const egl = @cImport({
     @cDefine("WL_EGL_PLATFORM", "1");
     @cInclude("EGL/egl.h");
@@ -24,20 +27,6 @@ const zwlr = wayland.client.zwlr;
 pub const opengl_error_handling = .assert;
 pub const std_options: std.Options = .{
     .log_level = if (builtin.mode == .Debug) .debug else .info,
-};
-
-/// Global uniforms for custom shaders.
-pub const Uniforms = extern struct {
-    resolution: [3]f32 align(16) = .{ 0, 0, 0 },
-    time: f32 align(4) = 1,
-    time_delta: f32 align(4) = 1,
-    frame_rate: f32 align(4) = 1,
-    frame: i32 align(4) = 1,
-    channel_time: [4]f32 align(16) = [_]f32{ 0, 0, 0, 0 },
-    channel_resolution: [4][3]f32 align(16) = [1][3]f32{.{ 0, 0, 0 }} ** 4,
-    mouse: [4]f32 align(16) = .{ 0, 0, 0, 0 },
-    date: [4]f32 align(16) = .{ 0, 0, 0, 0 },
-    sample_rate: f32 align(4) = 1,
 };
 
 /// An output that represents a physical display.
@@ -576,17 +565,6 @@ const FractionalScale = struct {
     }
 };
 
-const vs_source =
-    \\#version 330 core
-    \\
-    \\layout(location = 0) in vec2 position;
-    \\
-    \\void main() {
-    \\    gl_Position = vec4(position, 0.0, 1.0);
-    \\}
-;
-const shadertoy_preamble = @embedFile("shadertoy_preamble.glsl");
-
 const Resolution = struct {
     width: u32,
     height: u32,
@@ -717,52 +695,17 @@ pub fn main() !u8 {
 
     try surface.makeCurrent();
 
-    const vert = gl.Shader.create(.vertex);
-    defer vert.delete();
-    vert.source(1, &.{vs_source[0..]});
-    vert.compile();
-
-    const frag = gl.Shader.create(.fragment);
-    defer frag.delete();
-
-    {
-        const fs_file = std.fs.cwd().readFileAlloc(allocator, shader_path, std.math.maxInt(usize)) catch |err| switch (err) {
-            error.FileNotFound => {
-                std.log.err("shader file not found: {s}", .{shader_path});
-                return 1;
-            },
-            else => |e| {
-                std.log.err("failed to read shader file: {}", .{e});
-                return 1;
-            },
-        };
-        defer allocator.free(fs_file);
-
-        frag.source(2, &.{ shadertoy_preamble[0..], fs_file });
-        frag.compile();
-        const frag_compiled = frag.get(.compile_status) == gl.binding.TRUE;
-        if (!frag_compiled) {
-            const log = try frag.getCompileLog(allocator);
-            defer allocator.free(log);
-
-            std.log.err(
-                \\failed to compile shader!
-                \\This might mean the shader is broken, or that it uses features of GLSL
-                \\that are beyond 3.30 core.
-                \\
-                \\Shader log:
-                \\{s}
-            , .{log});
+    const shader_source = std.fs.cwd().readFileAlloc(allocator, shader_path, std.math.maxInt(usize)) catch |err| switch (err) {
+        error.FileNotFound => {
+            std.log.err("shader file not found: {s}", .{shader_path});
             return 1;
-        }
-    }
-
-    const program = gl.Program.create();
-    defer program.delete();
-
-    program.attach(vert);
-    program.attach(frag);
-    program.link();
+        },
+        else => |e| {
+            std.log.err("failed to read shader file: {}", .{e});
+            return 1;
+        },
+    };
+    defer allocator.free(shader_source);
 
     var using_custom_frame_rate = false;
     var target_frame_rate = output.refresh_rate;
@@ -775,71 +718,29 @@ pub fn main() !u8 {
         target_frame_rate = @intCast(frame_rate);
     }
 
-    var uniforms = Uniforms{
-        .resolution = .{ @floatFromInt(output.width), @floatFromInt(output.height), 0 },
-        .frame_rate = @floatFromInt(target_frame_rate),
-    };
-
-    const vao = gl.VertexArray.gen();
-    defer vao.delete();
-    vao.bind();
-
-    // zig fmt: off
-    const vertices = [_]f32{
-        -1.0, -1.0,
-         1.0, -1.0,
-         1.0,  1.0,
-        -1.0,  1.0,
-    };
-    // zig fmt: on
-
-    const vbo = gl.Buffer.gen();
-    defer vbo.delete();
-    {
-        vbo.bind(.array_buffer);
-        gl.bufferData(.array_buffer, f32, vertices[0..], .static_draw);
-
-        gl.vertexAttribPointer(0, 2, .float, false, 2 * @sizeOf(f32), 0);
-        // gl.vertexAttribBinding(0, 0);
-        // gl.bindVertexBuffer(0, vbo, 0, 2 * @sizeOf(f32));
-        gl.enableVertexAttribArray(0);
-    }
-
-    const ubo = gl.Buffer.gen();
-    defer ubo.delete();
-    ubo.bind(.uniform_buffer);
-    gl.bufferData(.uniform_buffer, Uniforms, &.{uniforms}, .static_draw);
-    gl.bindBufferBase(.uniform_buffer, 0, ubo);
-
-    const ebo = gl.Buffer.gen();
-    defer ebo.delete();
-    {
-        ebo.bind(.element_array_buffer);
-        gl.bufferData(.element_array_buffer, u8, &.{
-            0, 1, 2, // Top-left triangle
-            2, 3, 0, // Bottom-right triangle
-        }, .static_draw);
-    }
-
     const expected_frame_time_ns = @as(u64, std.time.ns_per_s) / target_frame_rate;
 
-    const first_frame_time = try std.time.Instant.now();
-    var last_frame_time = first_frame_time;
+    var global_attributes = GlobalAttributes.init();
+    defer global_attributes.deinit();
+    global_attributes.bind();
+
+    const shader = try Shader.create(allocator, shader_source, .{ .width = surface.width, .height = surface.height }, target_frame_rate);
+    defer shader.destroy(allocator);
+
     var next_frame_time: u64 = 0;
-    var render_frame = true;
-    var frame: usize = 0;
+    var render_frame: bool = false;
 
     while (true) {
         if (try surface.synchronizeOutputChanges(display)) {
-            uniforms.resolution = .{ @floatFromInt(surface.width), @floatFromInt(surface.height), 0 };
+            shader.resolution = .{ .width = surface.width, .height = surface.height };
             gl.viewport(0, 0, surface.width, surface.height);
         }
 
         const now = try std.time.Instant.now();
-        const now_ns = (@as(u64, @intCast(now.timestamp.sec)) * std.time.ns_per_s) + @as(u64, @intCast(now.timestamp.nsec));
+        const now_ns = now.since(std.mem.zeroes(std.time.Instant));
 
         // For the first frame, we want to render immediately.
-        if (frame > 0) {
+        if (shader.frame > 0) {
             if (using_custom_frame_rate) {
                 // NOTE: dispatchPending because we don't want to block on a
                 //       non-existent frame event.
@@ -858,27 +759,14 @@ pub fn main() !u8 {
             }
         }
 
-        frame += 1;
-
         if (!using_custom_frame_rate) {
             const callback = try surface.requestAnimationFrame();
             callback.setListener(*bool, setRenderFrame, &render_frame);
         }
 
-        const since_ns: f32 = @floatFromInt(now.since(first_frame_time));
-        const delta_ns: f32 = @floatFromInt(now.since(last_frame_time));
-        uniforms.time = since_ns / std.time.ns_per_s;
-        uniforms.time_delta = delta_ns / std.time.ns_per_s;
-        uniforms.frame = @intCast(frame);
-        last_frame_time = now;
         next_frame_time = now_ns + expected_frame_time_ns;
 
-        program.use();
-        vao.bind();
-        gl.bufferData(.uniform_buffer, Uniforms, &.{uniforms}, .static_draw);
-
-        gl.drawElements(.triangles, 6, .unsigned_byte, 0);
-
+        try shader.render();
         try surface.swapBuffers();
     }
 
