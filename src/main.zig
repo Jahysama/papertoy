@@ -571,7 +571,7 @@ const Resolution = struct {
 };
 
 const Options = struct {
-    output: u32 = 0,
+    output: ?[]const u8 = null,
     @"frame-rate": ?u32 = null,
     resolution: ?[]const u8 = null,
     help: bool = false,
@@ -592,7 +592,7 @@ pub fn printUsage() !void {
         \\  SHADER_FILE       The path to the shader file to render. This should be a GLSL
         \\                    fragment shader that is compatible with the Shadertoy API.
         \\Options:
-        \\  --output <index>   Specify the output index to render to (default: 0)
+        \\  --output <name>    Set the output to render the shader on (default: first available output)
         \\  --frame-rate <fps> Set a custom frame rate for the shader (default: vsync)
         \\  --resolution <WxH> Set the resolution of the shader (default: output resolution)
         \\  --help             Show this help message
@@ -682,13 +682,36 @@ pub fn main() !u8 {
     const compositor = registry_listener.compositor orelse return error.NoWlCompositor;
     const layer_shell = registry_listener.layer_shell_v1 orelse return error.NoWlrLayerShellV1;
 
-    if (registry_listener.outputs.items.len < options.options.output) {
-        std.log.err("output index {} is out of bounds ({} outputs available)", .{ options.options.output, registry_listener.outputs.items.len });
-        return 1;
-    }
-
     // TODO: Support multiple outputs at once.
-    const output = registry_listener.outputs.items[options.options.output];
+    const output = output: {
+        if (registry_listener.outputs.items.len == 0) {
+            std.log.err("no outputs available, cannot render", .{});
+            return 1;
+        }
+
+        if (options.options.output == null)
+            break :output registry_listener.outputs.items[0];
+
+        const wanted_output_name = options.options.output.?;
+        for (registry_listener.outputs.items) |output| {
+            try output.wait(display);
+            if (std.mem.eql(u8, output.name, wanted_output_name))
+                break :output output;
+        }
+
+        std.log.err("output with name {s} not found", .{wanted_output_name});
+        std.log.info("available outputs:", .{});
+        for (registry_listener.outputs.items) |output| {
+            std.log.info("- {s} ({}x{}, {}Hz)", .{
+                output.name,
+                output.width,
+                output.height,
+                @round(@as(f32, @floatFromInt(output.refresh_rate)) / 1000),
+            });
+        }
+
+        return 1;
+    };
 
     const surface = try WlrSurface.createEgl(allocator, display, compositor, layer_shell, registry_listener.fractional_scale_manager_v1, registry_listener.viewporter_v1, output, custom_resolution);
     defer surface.deinit();
