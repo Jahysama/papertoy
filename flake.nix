@@ -123,26 +123,23 @@
           ++ packages.default.zigWrapperLibs;
       };
 
-      checks.nix-format = pkgs.stdenv.mkDerivation {
-        name = "nix-format";
-        src = ./flake.nix;
-        nativeBuildInputs = [alejandra.defaultPackage.${system}];
-        phases = ["buildPhase"];
-        buildPhase = ''
+      checks.nix-format =
+        pkgs.runCommand "nix-format" {
+          nativeBuildInputs = [
+            alejandra.defaultPackage.${system}
+          ];
+        } ''
           mkdir -p $out
           ${pkgs.lib.getExe alejandra.defaultPackage.${system}} --check ${./flake.nix}
         '';
-      };
-      checks.zig-format = pkgs.stdenv.mkDerivation {
-        name = "zig-format";
-        nativeBuildInputs = [
-          env.zig
-        ];
-        phases = ["buildPhase"];
-        buildPhase = ''
+      checks.zig-format =
+        pkgs.runCommand "zig-format" {
+          nativeBuildInputs = [
+            env.zig
+          ];
+        } ''
           mkdir -p $out
           ${pkgs.lib.getExe env.zig} fmt --check .
         '';
-      };
     }));
 }
