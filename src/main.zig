@@ -319,8 +319,19 @@ const WlrSurface = struct {
 
         // We want to ignore any exclusive zones set by other surfaces.
         self.wlr_surface.setExclusiveZone(-1);
-        self.wlr_surface.setSize(self.width, self.height);
-        self.wl_surface.setBufferScale(@intCast(self.scale));
+        self.wlr_surface.setSize(self.destination_width, self.destination_height);
+
+        // NOTE: When the wp_fractional_scale_manager_v1 protocol is active, the
+        //       application is responsible for rendering at the exact physical
+        //       pixel size, and the Wayland surface buffer scale should be set
+        //       to 1. We were previously always using the output scale here,
+        //       which caused "source rectangle extends outside of the content
+        //       area" errors on scaled outputs.
+        if (fractional_scale_manager != null) {
+            self.wl_surface.setBufferScale(1);
+        } else {
+            self.wl_surface.setBufferScale(@intCast(self.scale));
+        }
 
         // TODO: Make the user set this.
         self.wlr_surface.setAnchor(.{ .top = true, .left = true });
@@ -420,8 +431,14 @@ const WlrSurface = struct {
         self.destination_width = expected_destination_width;
         self.destination_height = expected_destination_height;
 
-        self.wl_surface.setBufferScale(@intCast(self.scale));
-        self.wlr_surface.setSize(self.width, self.height);
+        // NOTE: See comment in `createEgl` about fractional scale handling.
+        if (self.fractional_scale != null) {
+            self.wl_surface.setBufferScale(1);
+        } else {
+            self.wl_surface.setBufferScale(@intCast(self.scale));
+        }
+
+        self.wlr_surface.setSize(self.destination_width, self.destination_height);
         self.wl_egl_window.resize(@intCast(self.width), @intCast(self.height), 0, 0);
         std.log.debug("Surface resized to ({}, {}) with scale {}", .{ self.width, self.height, self.scale });
 
