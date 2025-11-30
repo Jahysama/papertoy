@@ -125,7 +125,7 @@
           ];
         } ''
           mkdir -p $out
-          ${pkgs.lib.getExe env.zig} fmt --check .
+          ${pkgs.lib.getExe env.zig} fmt --check ${./.}
         '';
     }));
 }
