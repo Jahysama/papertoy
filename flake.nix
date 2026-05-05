@@ -144,9 +144,9 @@
         passthru.zig = zig-drv;
       } hook-script;
     in
-      # Expose hook at the top level so zig2nix's package.nix can find it
-      # via zig.hook (mkDerivation merges passthru into the output attrset).
-      zig-drv // {hook = hook;};
+      # Expose hook and version at the top level so zig2nix's package.nix
+      # can find them (zig.hook, zig.version).
+      zig-drv // {hook = hook; version = "0.15.2";};
 
     env = zig2nix.outputs.zig-env.${system} {
       zig = zig-0_15_2;
