@@ -25,8 +25,9 @@
   in (flake-utils.lib.eachDefaultSystem (system: let
     pkgs = nixpkgs.legacyPackages.${system};
 
-    # zig2nix's version of zig-0_15_2 requires llvmPackages_21 which is not
-    # yet in nixpkgs. Download the pre-built binary directly instead.
+    # zig2nix's versions with zig-0_15_2 require llvmPackages_21 which is not
+    # yet in nixpkgs. Download the pre-built binary directly instead and wire
+    # up the setup hook that zig2nix's package.nix expects on zig.hook.
     zig-0_15_2 = let
       sources = {
         x86_64-linux = {
@@ -35,16 +36,17 @@
         };
         aarch64-linux = {
           url = "https://ziglang.org/download/0.15.2/zig-aarch64-linux-0.15.2.tar.xz";
-          hash = "sha256-TODO-fill-in-if-needed";
+          # fill in if aarch64 is ever needed
+          hash = "sha256-AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=";
         };
       };
-      src-meta = sources.${system} or (throw "No zig 0.15.2 binary for ${system}");
+      src-meta = sources.${system} or (throw "No zig 0.15.2 binary available for ${system}");
+
+      # Raw unpacked zig binary
       zig-bin = pkgs.stdenvNoCC.mkDerivation {
         pname = "zig";
         version = "0.15.2";
-        src = pkgs.fetchurl {
-          inherit (src-meta) url hash;
-        };
+        src = pkgs.fetchurl {inherit (src-meta) url hash;};
         phases = ["unpackPhase" "installPhase"];
         installPhase = ''
           mkdir -p $out/{bin,lib}
@@ -53,24 +55,98 @@
           install -m644 LICENSE $out/LICENSE
         '';
       };
-    in
-      if pkgs.stdenvNoCC.isLinux
-      then
-        # Wrap with bubblewrap so /usr/bin/env is accessible inside the Nix sandbox
-        pkgs.writeShellApplication {
-          name = "zig";
-          runtimeInputs = [pkgs.bubblewrap pkgs.coreutils];
-          text = ''
+
+      # On Linux, wrap with bubblewrap so /usr/bin/env is reachable in the Nix
+      # build sandbox (zig calls env internally for some operations).
+      zig-drv =
+        if pkgs.stdenvNoCC.isLinux
+        then
+          pkgs.writeShellScriptBin "zig" ''
             args=()
             for d in /*; do
               [[ -e "$d" ]] && args+=("--dev-bind" "$d" "$d")
             done
-            exec bwrap "''${args[@]}" \
+            exec ${pkgs.bubblewrap}/bin/bwrap "''${args[@]}" \
               --bind ${pkgs.coreutils} /usr \
               -- ${zig-bin}/bin/zig "$@"
-          '';
+          ''
+        else zig-bin;
+
+      # Replicate the setup-hook that zig2nix attaches to its zig packages.
+      # package.nix accesses zig.hook so this must be present.
+      hook-script = pkgs.writeText "zig-setup-hook.sh" ''
+        # shellcheck shell=bash disable=SC2154,SC2086
+        readonly zigDefaultFlagsArray=(@zig_default_flags@)
+
+        function zigSetGlobalCacheDir {
+          ZIG_GLOBAL_CACHE_DIR=$(mktemp -d)
+          export ZIG_GLOBAL_CACHE_DIR
+          ZIG_LOCAL_CACHE_DIR="$ZIG_GLOBAL_CACHE_DIR"
+          export ZIG_LOCAL_CACHE_DIR
+          TERM=dumb
+          export TERM
         }
-      else zig-bin;
+
+        function zigBuildPhase {
+          runHook preBuild
+          local flagsArray=(
+            "''${zigDefaultFlagsArray[@]}"
+            $zigBuildFlags "''${zigBuildFlagsArray[@]}"
+          )
+          echoCmd 'zig build flags' "''${flagsArray[@]}"
+          zig build "''${flagsArray[@]}"
+          runHook postBuild
+        }
+
+        function zigCheckPhase {
+          runHook preCheck
+          local flagsArray=(
+            "''${zigDefaultFlagsArray[@]}"
+            $zigCheckFlags "''${zigCheckFlagsArray[@]}"
+          )
+          echoCmd 'zig check flags' "''${flagsArray[@]}"
+          zig build test "''${flagsArray[@]}"
+          runHook postCheck
+        }
+
+        function zigInstallPhase {
+          runHook preInstall
+          local flagsArray=(
+            "''${zigDefaultFlagsArray[@]}"
+            $zigBuildFlags "''${zigBuildFlagsArray[@]}"
+            $zigInstallFlags "''${zigInstallFlagsArray[@]}"
+          )
+          if [ -z "''${dontAddPrefix-}" ]; then
+            flagsArray+=("''${prefixKey:---prefix}" "$prefix")
+          fi
+          echoCmd 'zig install flags' "''${flagsArray[@]}"
+          zig build install "''${flagsArray[@]}"
+          runHook postInstall
+        }
+
+        addEnvHooks "$hostOffset" zigSetGlobalCacheDir
+
+        if [ -z "''${dontUseZigBuild-}" ] && [ -z "''${buildPhase-}" ]; then
+          buildPhase=zigBuildPhase
+        fi
+        if [ -z "''${dontUseZigCheck-}" ] && [ -z "''${checkPhase-}" ]; then
+          checkPhase=zigCheckPhase
+        fi
+        if [ -z "''${dontUseZigInstall-}" ] && [ -z "''${installPhase-}" ]; then
+          installPhase=zigInstallPhase
+        fi
+      '';
+
+      hook = pkgs.makeSetupHook {
+        name = "zig-hook";
+        propagatedBuildInputs = [zig-drv];
+        substitutions.zig_default_flags = [];
+        passthru.zig = zig-drv;
+      } hook-script;
+    in
+      # Expose hook at the top level so zig2nix's package.nix can find it
+      # via zig.hook (mkDerivation merges passthru into the output attrset).
+      zig-drv // {hook = hook;};
 
     env = zig2nix.outputs.zig-env.${system} {
       zig = zig-0_15_2;
