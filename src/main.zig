@@ -779,6 +779,13 @@ pub fn main() !u8 {
         const now = try std.time.Instant.now();
         const now_ns = now.since(std.mem.zeroes(std.time.Instant));
 
+        // Request a frame callback at the start of each iteration to ensure we always
+        // have one pending, even after screen wake or other compositor state changes.
+        if (!using_custom_frame_rate) {
+            const callback = try surface.requestAnimationFrame();
+            callback.setListener(*bool, setRenderFrame, &render_frame);
+        }
+
         // For the first frame, we want to render immediately.
         if (shader.frame > 0) {
             if (using_custom_frame_rate) {
@@ -797,11 +804,6 @@ pub fn main() !u8 {
                 if (!render_frame) continue;
                 render_frame = false;
             }
-        }
-
-        if (!using_custom_frame_rate) {
-            const callback = try surface.requestAnimationFrame();
-            callback.setListener(*bool, setRenderFrame, &render_frame);
         }
 
         next_frame_time = now_ns + expected_frame_time_ns;

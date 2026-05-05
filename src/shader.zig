@@ -50,6 +50,7 @@ const UniformData = extern struct {
     mouse: [4]f32 align(16) = .{ 0, 0, 0, 0 },
     date: [4]f32 align(16) = .{ 0, 0, 0, 0 },
     sample_rate: f32 align(4) = 1,
+    random_seed: f32 align(4) = 0,
 };
 
 /// Wrapper around the UBO for Shadertoy uniforms.
@@ -164,6 +165,7 @@ pub const Shader = struct {
             .uniforms = .init(.{
                 .resolution = .{ @floatFromInt(resolution.width), @floatFromInt(resolution.height), 0 },
                 .frame_rate = @floatFromInt(frame_rate),
+                .random_seed = std.crypto.random.float(f32),
             }),
             .resolution = resolution,
             .frame_rate = frame_rate,
