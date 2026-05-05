@@ -25,8 +25,55 @@
   in (flake-utils.lib.eachDefaultSystem (system: let
     pkgs = nixpkgs.legacyPackages.${system};
 
+    # zig2nix's version of zig-0_15_2 requires llvmPackages_21 which is not
+    # yet in nixpkgs. Download the pre-built binary directly instead.
+    zig-0_15_2 = let
+      sources = {
+        x86_64-linux = {
+          url = "https://ziglang.org/download/0.15.2/zig-x86_64-linux-0.15.2.tar.xz";
+          hash = "sha256-AqonDxg9onbltZILHaxEpj8aSeVQUOveOuzJ64L5Mjk=";
+        };
+        aarch64-linux = {
+          url = "https://ziglang.org/download/0.15.2/zig-aarch64-linux-0.15.2.tar.xz";
+          hash = "sha256-TODO-fill-in-if-needed";
+        };
+      };
+      src-meta = sources.${system} or (throw "No zig 0.15.2 binary for ${system}");
+      zig-bin = pkgs.stdenvNoCC.mkDerivation {
+        pname = "zig";
+        version = "0.15.2";
+        src = pkgs.fetchurl {
+          inherit (src-meta) url hash;
+        };
+        phases = ["unpackPhase" "installPhase"];
+        installPhase = ''
+          mkdir -p $out/{bin,lib}
+          cp -r lib/* $out/lib
+          install -Dm755 zig $out/bin/zig
+          install -m644 LICENSE $out/LICENSE
+        '';
+      };
+    in
+      if pkgs.stdenvNoCC.isLinux
+      then
+        # Wrap with bubblewrap so /usr/bin/env is accessible inside the Nix sandbox
+        pkgs.writeShellApplication {
+          name = "zig";
+          runtimeInputs = [pkgs.bubblewrap pkgs.coreutils];
+          text = ''
+            args=()
+            for d in /*; do
+              [[ -e "$d" ]] && args+=("--dev-bind" "$d" "$d")
+            done
+            exec bwrap "''${args[@]}" \
+              --bind ${pkgs.coreutils} /usr \
+              -- ${zig-bin}/bin/zig "$@"
+          '';
+        }
+      else zig-bin;
+
     env = zig2nix.outputs.zig-env.${system} {
-      zig = zig2nix.outputs.packages.${system}.zig-0_15_2;
+      zig = zig-0_15_2;
     };
 
     # Deps that need to be present when we run 'zig build'
