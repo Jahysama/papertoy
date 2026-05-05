@@ -172,7 +172,7 @@
         src = cleanSource ./.;
 
         # Packages required for compiling
-        nativeBuildInputs = zigBuildDeps;
+        nativeBuildInputs = zigBuildDeps ++ [ pkgs.autoPatchelfHook ];
 
         # Packages required for linking
         buildInputs = with env.pkgs; [
