@@ -45,12 +45,12 @@ const UniformData = extern struct {
     time_delta: f32 align(4) = 1,
     frame_rate: f32 align(4) = 1,
     frame: i32 align(4) = 1,
+    random_seed: f32 align(4) = 0,
     channel_time: [4]f32 align(16) = [_]f32{ 0, 0, 0, 0 },
     channel_resolution: [4][3]f32 align(16) = [1][3]f32{.{ 0, 0, 0 }} ** 4,
     mouse: [4]f32 align(16) = .{ 0, 0, 0, 0 },
     date: [4]f32 align(16) = .{ 0, 0, 0, 0 },
     sample_rate: f32 align(4) = 1,
-    random_seed: f32 align(4) = 0,
 };
 
 /// Wrapper around the UBO for Shadertoy uniforms.

@@ -8,12 +8,12 @@
     uniform float   iTimeDelta;
     uniform float   iFrameRate;
     uniform int     iFrame;
+    uniform float   iRandom;
     uniform float   iChannelTime[4];
     uniform vec3    iChannelResolution[4];
     uniform vec4    iMouse;
     uniform vec4    iDate;
     uniform float   iSampleRate;
-    uniform float   iRandom;
 };
 
 // Currently unused since we don't have a texture to sample from
