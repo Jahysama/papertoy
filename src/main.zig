@@ -358,14 +358,76 @@ const WlrSurface = struct {
 
     /// Deinitialize the wlroots surface.
     pub fn deinit(self: *WlrSurface) void {
-        self.wlr_surface.destroy();
-        self.wl_egl_window.destroy();
-        self.wl_surface.destroy();
+        self.destroyWaylandObjects();
         _ = egl.eglDestroyContext(self.egl_display, self.egl_context);
         _ = egl.eglTerminate(self.egl_display);
+        self.allocator.destroy(self);
+    }
+
+    /// Destroy only the Wayland/EGL-surface objects, keeping the EGL context alive.
+    /// Used before recreating the layer surface after a closed event.
+    fn destroyWaylandObjects(self: *WlrSurface) void {
+        self.wlr_surface.destroy();
         if (self.fractional_scale) |scale| scale.destroy(self.allocator);
         if (self.viewport) |viewport| viewport.destroy();
-        self.allocator.destroy(self);
+        _ = egl.eglMakeCurrent(self.egl_display, egl.EGL_NO_SURFACE, egl.EGL_NO_SURFACE, egl.EGL_NO_CONTEXT);
+        _ = egl.eglDestroySurface(self.egl_display, self.egl_surface);
+        self.wl_egl_window.destroy();
+        self.wl_surface.destroy();
+    }
+
+    /// Recreate the Wayland layer surface after a closed event (e.g. DPMS off/on).
+    /// The EGL context is preserved so all OpenGL resources remain valid.
+    pub fn recreate(self: *WlrSurface, display: *wl.Display, compositor: *wl.Compositor, layer_shell: *zwlr.LayerShellV1, fractional_scale_manager: ?*wp.FractionalScaleManagerV1, viewporter: ?*wp.Viewporter) !void {
+        self.destroyWaylandObjects();
+
+        self.wl_surface = try compositor.createSurface();
+        errdefer self.wl_surface.destroy();
+
+        self.wl_egl_window = try wl.EglWindow.create(self.wl_surface, @intCast(self.width), @intCast(self.height));
+        errdefer self.wl_egl_window.destroy();
+
+        self.egl_surface = egl.eglCreatePlatformWindowSurface(
+            self.egl_display,
+            self.egl_config,
+            @ptrCast(self.wl_egl_window),
+            null,
+        ) orelse switch (egl.eglGetError()) {
+            egl.EGL_BAD_MATCH => return error.MismatchedConfig,
+            egl.EGL_BAD_CONFIG => return error.InvalidConfig,
+            egl.EGL_BAD_NATIVE_WINDOW => return error.InvalidNativeWindow,
+            else => return error.FailedToCreateSurface,
+        };
+        errdefer _ = egl.eglDestroySurface(self.egl_display, self.egl_surface);
+
+        self.wlr_surface = try layer_shell.getLayerSurface(self.wl_surface, self.output.output, .background, "papertoy");
+        errdefer self.wlr_surface.destroy();
+
+        self.wlr_surface.setListener(*WlrSurface, listener, self);
+        self.wlr_surface.setExclusiveZone(-1);
+        self.wlr_surface.setSize(self.destination_width, self.destination_height);
+
+        if (fractional_scale_manager != null) {
+            self.wl_surface.setBufferScale(1);
+        } else {
+            self.wl_surface.setBufferScale(@intCast(self.scale));
+        }
+
+        self.wlr_surface.setAnchor(.{ .top = true, .left = true });
+
+        if (fractional_scale_manager) |manager| {
+            self.fractional_scale = try FractionalScale.create(self.allocator, manager, self.wl_surface);
+            self.viewport = try viewporter.?.getViewport(self.wl_surface);
+        } else {
+            self.fractional_scale = null;
+            self.viewport = null;
+        }
+
+        self.wl_surface.commit();
+        if (display.roundtrip() != .SUCCESS) return error.RoundtripFailed;
+
+        try self.makeCurrent();
+        self.closed = false;
     }
 
     /// Make the EGL context current.
@@ -734,7 +796,8 @@ pub fn main() !u8 {
         return 1;
     };
 
-    var surface = try WlrSurface.createEgl(allocator, display, compositor, layer_shell, registry_listener.fractional_scale_manager_v1, registry_listener.viewporter_v1, output, custom_resolution);
+    const surface = try WlrSurface.createEgl(allocator, display, compositor, layer_shell, registry_listener.fractional_scale_manager_v1, registry_listener.viewporter_v1, output, custom_resolution);
+    defer surface.deinit();
 
     try surface.makeCurrent();
 
@@ -776,12 +839,10 @@ pub fn main() !u8 {
     while (true) {
         if (surface.closed) {
             std.log.info("layer surface closed (screen off?), waiting to recreate...", .{});
-            surface.deinit();
             // Brief pause so the compositor can settle, then roundtrip to drain events.
             std.posix.nanosleep(0, 200 * std.time.ns_per_ms);
             if (display.roundtrip() != .SUCCESS) return error.RoundtripFailed;
-            surface = try WlrSurface.createEgl(allocator, display, compositor, layer_shell, registry_listener.fractional_scale_manager_v1, registry_listener.viewporter_v1, output, custom_resolution);
-            try surface.makeCurrent();
+            try surface.recreate(display, compositor, layer_shell, registry_listener.fractional_scale_manager_v1, registry_listener.viewporter_v1);
             render_frame = false;
             shader.resolution = .{ .width = surface.width, .height = surface.height };
             gl.viewport(0, 0, surface.width, surface.height);
