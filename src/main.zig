@@ -275,6 +275,7 @@ const WlrSurface = struct {
 
         self.allocator = allocator;
         self.output = output;
+        self.closed = false;
 
         self.width = output.width;
         self.height = output.height;
@@ -357,6 +358,9 @@ const WlrSurface = struct {
 
     /// Deinitialize the wlroots surface.
     pub fn deinit(self: *WlrSurface) void {
+        self.wlr_surface.destroy();
+        self.wl_egl_window.destroy();
+        self.wl_surface.destroy();
         _ = egl.eglDestroyContext(self.egl_display, self.egl_context);
         _ = egl.eglTerminate(self.egl_display);
         if (self.fractional_scale) |scale| scale.destroy(self.allocator);
