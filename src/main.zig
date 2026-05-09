@@ -104,9 +104,8 @@ const Output = struct {
             .mode => |mode| {
                 self.ready = false;
 
-                if (mode.width <= 0) @panic("output width is non-positive?!");
-                if (mode.height <= 0) @panic("output height is non-positive?!");
-                if (mode.refresh <= 0) @panic("output refresh rate is non-positive?!");
+                // Zero/negative values are sent when the output is disabled (e.g. DPMS).
+                if (mode.width <= 0 or mode.height <= 0 or mode.refresh <= 0) return;
 
                 self.width = @intCast(mode.width);
                 self.height = @intCast(mode.height);
@@ -266,6 +265,8 @@ const WlrSurface = struct {
     // --- wlroots Layer Shell ---
     /// The wlroots surface.
     wlr_surface: *zwlr.LayerSurfaceV1,
+    /// Set to true when the compositor sends a `closed` event (e.g. DPMS off).
+    closed: bool = false,
 
     /// Create a wlroots surface with EGL for GPU rendering.
     pub fn createEgl(allocator: Allocator, display: *wl.Display, compositor: *wl.Compositor, layer_shell: *zwlr.LayerShellV1, fractional_scale_manager: ?*wp.FractionalScaleManagerV1, viewporter: ?*wp.Viewporter, output: *Output, custom_resolution: ?Resolution) !*WlrSurface {
@@ -520,14 +521,13 @@ const WlrSurface = struct {
 
     /// Handle a wlroots surface event.
     fn listener(wlr_surface: *zwlr.LayerSurfaceV1, event: zwlr.LayerSurfaceV1.Event, self: *WlrSurface) void {
-        _ = self;
-
         switch (event) {
             .configure => |configure| {
-                const serial = configure.serial;
-                wlr_surface.ackConfigure(serial);
+                wlr_surface.ackConfigure(configure.serial);
             },
-            .closed => {},
+            .closed => {
+                self.closed = true;
+            },
         }
     }
 };
@@ -730,8 +730,7 @@ pub fn main() !u8 {
         return 1;
     };
 
-    const surface = try WlrSurface.createEgl(allocator, display, compositor, layer_shell, registry_listener.fractional_scale_manager_v1, registry_listener.viewporter_v1, output, custom_resolution);
-    defer surface.deinit();
+    var surface = try WlrSurface.createEgl(allocator, display, compositor, layer_shell, registry_listener.fractional_scale_manager_v1, registry_listener.viewporter_v1, output, custom_resolution);
 
     try surface.makeCurrent();
 
@@ -771,6 +770,19 @@ pub fn main() !u8 {
     var render_frame: bool = false;
 
     while (true) {
+        if (surface.closed) {
+            std.log.info("layer surface closed (screen off?), waiting to recreate...", .{});
+            surface.deinit();
+            // Brief pause so the compositor can settle, then roundtrip to drain events.
+            std.posix.nanosleep(0, 200 * std.time.ns_per_ms);
+            if (display.roundtrip() != .SUCCESS) return error.RoundtripFailed;
+            surface = try WlrSurface.createEgl(allocator, display, compositor, layer_shell, registry_listener.fractional_scale_manager_v1, registry_listener.viewporter_v1, output, custom_resolution);
+            try surface.makeCurrent();
+            render_frame = false;
+            shader.resolution = .{ .width = surface.width, .height = surface.height };
+            gl.viewport(0, 0, surface.width, surface.height);
+        }
+
         if (try surface.synchronizeOutputChanges(display)) {
             shader.resolution = .{ .width = surface.width, .height = surface.height };
             gl.viewport(0, 0, surface.width, surface.height);
