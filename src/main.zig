@@ -414,10 +414,9 @@ const WlrSurface = struct {
         };
         errdefer _ = egl.eglDestroySurface(self.egl_display, self.egl_surface);
 
-        // Pass null for the output so the compositor places the surface on the correct
-        // output automatically. This avoids using a potentially stale wl_output proxy
-        // (Hyprland removes the output global on DPMS off and re-adds it on DPMS on).
-        self.wlr_surface = try layer_shell.getLayerSurface(self.wl_surface, null, .background, "papertoy");
+        // Use self.output.output (the fresh proxy from after DPMS-on) so Hyprland
+        // knows which monitor to assign the surface to and schedules frame callbacks.
+        self.wlr_surface = try layer_shell.getLayerSurface(self.wl_surface, self.output.output, .background, "papertoy");
         errdefer self.wlr_surface.destroy();
 
         self.wlr_surface.setListener(*WlrSurface, listener, self);
@@ -608,6 +607,7 @@ const WlrSurface = struct {
                 wlr_surface.ackConfigure(configure.serial);
             },
             .closed => {
+                std.log.info("zwlr_layer_surface_v1 closed", .{});
                 self.closed = true;
             },
         }
@@ -906,6 +906,8 @@ pub fn main() !u8 {
             // arrives because Hyprland won't schedule frames for a buffer-less surface.
             try shader.render();
             try surface.swapBuffers();
+            _ = display.flush();
+            std.log.info("surface recreated, initial frame submitted", .{});
         }
 
         if (try surface.synchronizeOutputChanges(display)) {
