@@ -41,6 +41,8 @@ const Output = struct {
 
     /// The ID of the output.
     id: u32,
+    /// Whether the output is currently enabled (non-zero mode). False during DPMS off.
+    enabled: bool = true,
     /// The name of the output. Set by the `name` event.
     name: []const u8 = undefined,
     /// The human-friendly description of the output. Set by the `description` event.
@@ -105,8 +107,12 @@ const Output = struct {
                 self.ready = false;
 
                 // Zero/negative values are sent when the output is disabled (e.g. DPMS).
-                if (mode.width <= 0 or mode.height <= 0 or mode.refresh <= 0) return;
+                if (mode.width <= 0 or mode.height <= 0 or mode.refresh <= 0) {
+                    self.enabled = false;
+                    return;
+                }
 
+                self.enabled = true;
                 self.width = @intCast(mode.width);
                 self.height = @intCast(mode.height);
                 self.refresh_rate = @intCast(mode.refresh);
@@ -427,7 +433,6 @@ const WlrSurface = struct {
         if (display.roundtrip() != .SUCCESS) return error.RoundtripFailed;
 
         try self.makeCurrent();
-        self.closed = false;
     }
 
     /// Make the EGL context current.
@@ -837,11 +842,24 @@ pub fn main() !u8 {
     var render_frame: bool = false;
 
     while (true) {
-        if (surface.closed) {
+        while (surface.closed) {
             std.log.info("layer surface closed (screen off?), waiting to recreate...", .{});
-            // Brief pause so the compositor can settle, then roundtrip to drain events.
-            std.posix.nanosleep(0, 200 * std.time.ns_per_ms);
+            // Reset closed before the wait so any new closed events during roundtrips are
+            // captured and cause another iteration of this loop rather than being lost.
+            surface.closed = false;
+
+            // Wait for the output to signal it is active again (non-zero mode + done).
+            // Some compositors send mode(0) on DPMS off; we must not recreate while off
+            // or the compositor will reject get_layer_surface and crash the display.
+            while (!output.enabled or !output.ready) {
+                std.posix.nanosleep(0, 50 * std.time.ns_per_ms);
+                if (display.roundtrip() != .SUCCESS) return error.RoundtripFailed;
+            }
+
+            // Extra settle pause so the compositor finishes bringing the output up.
+            std.posix.nanosleep(0, 100 * std.time.ns_per_ms);
             if (display.roundtrip() != .SUCCESS) return error.RoundtripFailed;
+
             try surface.recreate(display, compositor, layer_shell, registry_listener.fractional_scale_manager_v1, registry_listener.viewporter_v1);
             render_frame = false;
             shader.resolution = .{ .width = surface.width, .height = surface.height };
