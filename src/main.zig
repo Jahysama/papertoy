@@ -41,6 +41,10 @@ const Output = struct {
 
     /// The ID of the output.
     id: u32,
+    /// The registry global name used to match this output on global_remove.
+    global_name: u32,
+    /// Set to true when the compositor sends global_remove for this output (e.g. DPMS off).
+    removed: bool = false,
     /// Whether the output is currently enabled (non-zero mode). False during DPMS off.
     enabled: bool = true,
     /// The name of the output. Set by the `name` event.
@@ -62,7 +66,7 @@ const Output = struct {
     refresh_rate: u32 = undefined,
 
     /// Create a new output object.
-    pub fn create(allocator: Allocator, output: *wl.Output) !*Output {
+    pub fn create(allocator: Allocator, global_name: u32, output: *wl.Output) !*Output {
         const self = try allocator.create(Output);
         errdefer allocator.destroy(self);
 
@@ -70,6 +74,7 @@ const Output = struct {
             .allocator = allocator,
             .output = output,
             .id = output.getId(),
+            .global_name = global_name,
         };
         output.setListener(*Output, listener, self);
 
@@ -188,23 +193,24 @@ const RegistryListener = struct {
 
                 // Outputs
                 if (std.mem.orderZ(u8, global.interface, wl.Output.interface.name) == .eq) {
-                    const output = registry.bind(global.name, wl.Output, 4) catch return;
-                    self.addOutput(output) catch |err| std.debug.panic("Failed to add output: {}", .{err});
+                    const wl_output = registry.bind(global.name, wl.Output, 4) catch return;
+                    self.addOutput(global.name, wl_output) catch |err| std.debug.panic("Failed to add output: {}", .{err});
                 }
             },
             .global_remove => |global_remove| {
-                _ = global_remove;
-                // if (std.mem.orderZ(u8, global_remove.interface, wl.Output.interface.name) == .eq) {
-                //     if (!self.removeOutput(global_remove.name)) {
-                //         std.debug.print("!!! Removing output ID {} but it was not found!\n", .{global_remove.name});
-                //     }
-                // }
+                for (self.outputs.items) |output| {
+                    if (output.global_name == global_remove.name) {
+                        std.log.info("output '{s}' removed from registry (DPMS off or disconnect)", .{output.name});
+                        output.removed = true;
+                        break;
+                    }
+                }
             },
         }
     }
 
-    fn addOutput(self: *RegistryListener, wl_output: *wl.Output) !void {
-        const output = try Output.create(self.allocator, wl_output);
+    fn addOutput(self: *RegistryListener, global_name: u32, wl_output: *wl.Output) !void {
+        const output = try Output.create(self.allocator, global_name, wl_output);
         errdefer output.destroy();
 
         try output.wait(self.display);
@@ -406,7 +412,10 @@ const WlrSurface = struct {
         };
         errdefer _ = egl.eglDestroySurface(self.egl_display, self.egl_surface);
 
-        self.wlr_surface = try layer_shell.getLayerSurface(self.wl_surface, self.output.output, .background, "papertoy");
+        // Pass null for the output so the compositor places the surface on the correct
+        // output automatically. This avoids using a potentially stale wl_output proxy
+        // (Hyprland removes the output global on DPMS off and re-adds it on DPMS on).
+        self.wlr_surface = try layer_shell.getLayerSurface(self.wl_surface, null, .background, "papertoy");
         errdefer self.wlr_surface.destroy();
 
         self.wlr_surface.setListener(*WlrSurface, listener, self);
@@ -771,7 +780,7 @@ pub fn main() !u8 {
     const layer_shell = registry_listener.layer_shell_v1 orelse return error.NoWlrLayerShellV1;
 
     // TODO: Support multiple outputs at once.
-    const output = output: {
+    var output = output: {
         if (registry_listener.outputs.items.len == 0) {
             std.log.err("no outputs available, cannot render", .{});
             return 1;
@@ -844,19 +853,44 @@ pub fn main() !u8 {
     while (true) {
         while (surface.closed) {
             std.log.info("layer surface closed (screen off?), waiting to recreate...", .{});
-            // Reset closed before the wait so any new closed events during roundtrips are
-            // captured and cause another iteration of this loop rather than being lost.
+            // Reset closed before waiting so any new closed events during roundtrips are
+            // captured and cause another iteration rather than being silently dropped.
             surface.closed = false;
 
-            // Wait for the output to signal it is active again (non-zero mode + done).
-            // Some compositors send mode(0) on DPMS off; we must not recreate while off
-            // or the compositor will reject get_layer_surface and crash the display.
+            // Hyprland removes the wl_output global on DPMS off and re-adds it on DPMS on.
+            // We must not call get_layer_surface with the old (now invalid) wl_output, so
+            // wait until the output is back in the registry and ready before recreating.
+            if (output.removed) {
+                std.log.info("output removed from registry, waiting for it to return...", .{});
+                const wanted_name = output.name;
+                while (true) {
+                    std.posix.nanosleep(0, 100 * std.time.ns_per_ms);
+                    if (display.roundtrip() != .SUCCESS) return error.RoundtripFailed;
+
+                    // Look for a fresh (non-removed, ready) output with the same name.
+                    var found: ?*Output = null;
+                    for (registry_listener.outputs.items) |o| {
+                        if (!o.removed and o.ready and std.mem.eql(u8, o.name, wanted_name)) {
+                            found = o;
+                            break;
+                        }
+                    }
+                    if (found) |new_output| {
+                        std.log.info("output '{s}' returned, recreating surface", .{new_output.name});
+                        output = new_output;
+                        surface.output = new_output;
+                        break;
+                    }
+                }
+            }
+
+            // Also wait for mode+done (handles compositors that send mode(0) on DPMS).
             while (!output.enabled or !output.ready) {
                 std.posix.nanosleep(0, 50 * std.time.ns_per_ms);
                 if (display.roundtrip() != .SUCCESS) return error.RoundtripFailed;
             }
 
-            // Extra settle pause so the compositor finishes bringing the output up.
+            // Small settle so the compositor finishes bringing the output up.
             std.posix.nanosleep(0, 100 * std.time.ns_per_ms);
             if (display.roundtrip() != .SUCCESS) return error.RoundtripFailed;
 
