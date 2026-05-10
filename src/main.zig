@@ -901,10 +901,15 @@ pub fn main() !u8 {
             render_frame = false;
             shader.resolution = .{ .width = surface.width, .height = surface.height };
             gl.viewport(0, 0, surface.width, surface.height);
-            // Give the compositor an initial buffer so it starts sending frame callbacks.
-            // Without this, dispatch() blocks forever waiting for a callback that never
-            // arrives because Hyprland won't schedule frames for a buffer-less surface.
+            // Render an initial frame and request a frame callback BEFORE swapBuffers
+            // so the request is batched with the buffer commit. Hyprland fires callbacks
+            // relative to commits; a frame() request sent after eglSwapBuffers misses
+            // the commit and the callback never arrives, blocking dispatch() forever.
             try shader.render();
+            if (!using_custom_frame_rate) {
+                const init_cb = try surface.requestAnimationFrame();
+                init_cb.setListener(*bool, setRenderFrame, &render_frame);
+            }
             try surface.swapBuffers();
             _ = display.flush();
             std.log.info("surface recreated, initial frame submitted", .{});
