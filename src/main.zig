@@ -607,7 +607,6 @@ const WlrSurface = struct {
                 wlr_surface.ackConfigure(configure.serial);
             },
             .closed => {
-                std.log.info("zwlr_layer_surface_v1 closed", .{});
                 self.closed = true;
             },
         }
@@ -912,7 +911,6 @@ pub fn main() !u8 {
             }
             try surface.swapBuffers();
             _ = display.flush();
-            std.log.info("surface recreated, initial frame submitted", .{});
         }
 
         if (try surface.synchronizeOutputChanges(display)) {
