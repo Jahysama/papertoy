@@ -901,6 +901,11 @@ pub fn main() !u8 {
             render_frame = false;
             shader.resolution = .{ .width = surface.width, .height = surface.height };
             gl.viewport(0, 0, surface.width, surface.height);
+            // Give the compositor an initial buffer so it starts sending frame callbacks.
+            // Without this, dispatch() blocks forever waiting for a callback that never
+            // arrives because Hyprland won't schedule frames for a buffer-less surface.
+            try shader.render();
+            try surface.swapBuffers();
         }
 
         if (try surface.synchronizeOutputChanges(display)) {
