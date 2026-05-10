@@ -853,13 +853,16 @@ pub fn main() !u8 {
     while (true) {
         while (surface.closed) {
             std.log.info("layer surface closed (screen off?), waiting to recreate...", .{});
-            // Reset closed before waiting so any new closed events during roundtrips are
-            // captured and cause another iteration rather than being silently dropped.
             surface.closed = false;
 
+            // Drain all pending compositor events first. The closed event often arrives
+            // before global_remove in the same batch, so we must roundtrip here before
+            // checking output state — otherwise output.removed will still be false.
+            std.posix.nanosleep(0, 100 * std.time.ns_per_ms);
+            if (display.roundtrip() != .SUCCESS) return error.RoundtripFailed;
+
             // Hyprland removes the wl_output global on DPMS off and re-adds it on DPMS on.
-            // We must not call get_layer_surface with the old (now invalid) wl_output, so
-            // wait until the output is back in the registry and ready before recreating.
+            // Wait until a fresh output with the same name is back and ready.
             if (output.removed) {
                 std.log.info("output removed from registry, waiting for it to return...", .{});
                 const wanted_name = output.name;
@@ -867,7 +870,6 @@ pub fn main() !u8 {
                     std.posix.nanosleep(0, 100 * std.time.ns_per_ms);
                     if (display.roundtrip() != .SUCCESS) return error.RoundtripFailed;
 
-                    // Look for a fresh (non-removed, ready) output with the same name.
                     var found: ?*Output = null;
                     for (registry_listener.outputs.items) |o| {
                         if (!o.removed and o.ready and std.mem.eql(u8, o.name, wanted_name)) {
@@ -884,15 +886,11 @@ pub fn main() !u8 {
                 }
             }
 
-            // Also wait for mode+done (handles compositors that send mode(0) on DPMS).
+            // Also wait for mode+done (compositors that signal DPMS via mode(0)).
             while (!output.enabled or !output.ready) {
                 std.posix.nanosleep(0, 50 * std.time.ns_per_ms);
                 if (display.roundtrip() != .SUCCESS) return error.RoundtripFailed;
             }
-
-            // Small settle so the compositor finishes bringing the output up.
-            std.posix.nanosleep(0, 100 * std.time.ns_per_ms);
-            if (display.roundtrip() != .SUCCESS) return error.RoundtripFailed;
 
             try surface.recreate(display, compositor, layer_shell, registry_listener.fractional_scale_manager_v1, registry_listener.viewporter_v1);
             render_frame = false;
