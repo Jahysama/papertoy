@@ -213,7 +213,9 @@ const RegistryListener = struct {
         const output = try Output.create(self.allocator, global_name, wl_output);
         errdefer output.destroy();
 
-        try output.wait(self.display);
+        // Do NOT call output.wait here: addOutput is called from inside a registry
+        // event callback, and calling roundtrip from within a dispatch callback
+        // deadlocks libwayland-client's read lock. Callers must wait separately.
         try self.outputs.append(self.allocator, output);
     }
 
@@ -786,8 +788,11 @@ pub fn main() !u8 {
             return 1;
         }
 
-        if (options.options.output == null)
-            break :output registry_listener.outputs.items[0];
+        if (options.options.output == null) {
+            const first = registry_listener.outputs.items[0];
+            try first.wait(display);
+            break :output first;
+        }
 
         const wanted_output_name = options.options.output.?;
         for (registry_listener.outputs.items) |output| {
